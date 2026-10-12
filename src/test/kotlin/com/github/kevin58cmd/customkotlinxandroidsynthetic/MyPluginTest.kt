@@ -6,7 +6,12 @@ import com.intellij.psi.xml.XmlFile
 import com.intellij.testFramework.TestDataPath
 import com.intellij.testFramework.fixtures.BasePlatformTestCase
 import com.intellij.util.PsiErrorElementUtil
-import com.github.kevin58cmd.customkotlinxandroidsynthetic.services.MyProjectService
+import com.github.kevin58cmd.customkotlinxandroidsynthetic.services.SyntheticProjectService
+import com.github.kevin58cmd.synthetic.GenerationSpec
+import com.github.kevin58cmd.synthetic.Generator
+import com.intellij.openapi.vfs.LocalFileSystem
+import java.nio.file.Files
+import org.junit.rules.TemporaryFolder
 
 @TestDataPath("\$CONTENT_ROOT/src/test/testData")
 class MyPluginTest : BasePlatformTestCase() {
@@ -30,9 +35,32 @@ class MyPluginTest : BasePlatformTestCase() {
     }
 
     fun testProjectService() {
-        val projectService = project.service<MyProjectService>()
+        assertSame(project.service<SyntheticProjectService>(), project.service<SyntheticProjectService>())
+    }
 
-        assertNotSame(projectService.getRandomNumber(), projectService.getRandomNumber())
+    fun testGeneratedFilesBecomeVisibleToVfs() {
+        // The default light fixture uses temp:// URLs, not disk paths.
+        val folder = TemporaryFolder()
+        folder.create()
+        try {
+            val root = folder.root.toPath()
+            val input = root.resolve("res/layout/screen.xml")
+            Files.createDirectories(input.parent)
+            Files.writeString(input, """<TextView xmlns:android="http://schemas.android.com/apk/res/android" android:id="@+id/label"/>""")
+            val output = root.resolve("generated")
+            val spec = GenerationSpec("sample", listOf(listOf(root.resolve("res"))), output)
+            Generator.generate(spec)
+            val generated = output.resolve("kotlinx/android/synthetic/main/screen/synthetic.kt")
+            val file = LocalFileSystem.getInstance().refreshAndFindFileByNioFile(generated)
+            assertNotNull(file)
+            assertTrue(String(file!!.contentsToByteArray()).contains("`label`"))
+            Files.delete(input)
+            Generator.generate(spec)
+            LocalFileSystem.getInstance().refreshIoFiles(listOf(output.toFile()), false, true, null)
+            assertFalse(file.isValid)
+        } finally {
+            folder.delete()
+        }
     }
 
     override fun getTestDataPath() = "src/test/testData/rename"

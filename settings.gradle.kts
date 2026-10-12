@@ -3,3 +3,4 @@ plugins {
 }
 
 rootProject.name = "custom-kotlinx-android-synthetic"
+include(":generator")

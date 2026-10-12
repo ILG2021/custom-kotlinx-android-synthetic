@@ -1,5 +1,7 @@
 .gradle
+.kotlin
 .idea
 .intellijPlatform
 .qodana
 build
+local.properties

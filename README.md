@@ -19,9 +19,9 @@ import kotlinx.android.synthetic.main.activity_main.*
 message.text = "Hello"
 ```
 
-普通控件只出现在部分语言、横竖屏等布局变体中时，生成属性为可空类型，例如 `optionalTitle: TextView?`，使用安全调用或先判空。这类控件会按名称查找资源 ID，资源被过滤或当前布局没有该控件时返回 `null`；布局共有的控件继续使用直接 `R.id` 引用和非空检查。升级这一行为时，需同步项目中的 `generator` 源码和 Studio 插件，再重新运行 `:app:generateSyntheticViews`。
+普通控件只出现在部分语言、横竖屏等布局变体中时，生成属性为可空类型，例如 `optionalTitle: TextView?`，使用安全调用或先判空。这类控件会按名称查找资源 ID，资源被过滤或当前布局没有该控件时返回 `null`；布局共有的控件继续使用直接 `R.id` 引用，保留非空属性类型，但不做运行时非空检查，实际结果可能为 `null`。升级这一行为时，需同步项目中的 `generator` 源码和 Studio 插件，再重新运行 `:app:generateSyntheticViews`。
 
-上述规则适用于所有控件类型，包括 Barrier 等布局辅助控件，没有单独的类型特判。仅部分布局存在的 ID 不会生成 `checkNotNull` 检查。
+上述规则适用于所有控件类型，包括 Barrier 等布局辅助控件，没有单独的类型特判。所有属性均不生成 `checkNotNull` 检查。
 
 ## 1. 复制到 Android 项目
 
@@ -95,9 +95,9 @@ plugins {
 
 移除旧的 `kotlin-android-extensions` 插件和手写的 `build/generated/synthetic-view-gen` 源码目录配置。使用旧版 IDE 插件的项目先升级该插件，再执行一次 `clean`；`@Parcelize` 改用独立的 `kotlin-parcelize`。
 
-旧版 Parcelize 批量修复：打开 **Tools → Synthetic Compatibility → Migrate Legacy Parcelize...**，选择项目、模块或源码目录，预览后统一应用。将 `kotlinx.android.parcel` 引用迁移到 `kotlinx.parcelize`，覆盖 `Parcelize`、`RawValue`、`Parceler` 等导入、别名、通配导入及全限定引用；包含测试源码，跳过构建和生成目录，不修改注释及字符串文本，支持统一 Undo。
+旧版 Parcelize 批量修复：打开 **Tools → Synthetic Compatibility → Migrate Legacy Parcelize (Whole Project)...**，直接扫描整个项目，无需选择目录，预览后统一应用。将 `kotlinx.android.parcel` 引用迁移到 `kotlinx.parcelize`，覆盖 `Parcelize`、`RawValue`、`Parceler` 等导入、别名、通配导入及全限定引用；包含测试源码，跳过构建和生成目录，不修改注释及字符串文本，支持统一 Undo。
 
-此操作同时预览并修改对应模块的 `build.gradle` / `build.gradle.kts`：替换直接声明的 `kotlin-android-extensions`，或在 `plugins` 块中补上 `kotlin-parcelize`，源码和配置支持统一 Undo。迁移后执行 Gradle Sync 并编译。已经迁移包名但尚未启用插件的源码也会触发配置检查。无法确定模块、`apply false` 声明、版本目录插件别名或无法可靠解析的 Groovy 字面量等配置会显示跳过原因，并保持该模块的源码和配置不变；这类配置需在对应版本目录或 convention plugin 中处理。
+此操作同时预览并修改对应模块的 `build.gradle` / `build.gradle.kts`：Groovy 模块存在 `apply plugin: 'com.android.application'` 时，将 `apply plugin: 'kotlin-parcelize'` 放在它之后，并调整已有直接声明的位置；其他脚本替换直接声明的 `kotlin-android-extensions`，或在 `plugins` 块中补上 `kotlin-parcelize`，源码和配置支持统一 Undo。迁移后执行 Gradle Sync 并编译。已经迁移包名但尚未启用插件的源码也会触发配置检查。无法确定模块、`apply false` 声明、版本目录插件别名、需保留显式插件版本或无法可靠解析的 Groovy 字面量等配置会显示跳过原因，并保持该模块的源码和配置不变；这类配置需在对应版本目录或 convention plugin 中处理。
 
 执行一次正常构建，或：
 
@@ -121,6 +121,8 @@ ViewHolder 与旧 Kotlin Android Extensions 保持一致：实现 `LayoutContain
 
 ### 配置项
 
+支持 XML 中的内部类名称，例如 `<view class="androidx.appcompat.widget.SearchView$SearchAutoComplete" .../>`；生成的 Kotlin 类型为 `androidx.appcompat.widget.SearchView.SearchAutoComplete`，无需手动配置 `typeOverrides`。升级时请更新 Android 项目中复制的 `generator/` 源码；仅安装 Studio 插件 ZIP 不会更新 Gradle 构建使用的生成器。
+
 以下选项放在模块的 `syntheticCompat { ... }` 中，Groovy 和 Kotlin DSL 均可使用 `.set(...)` / `.put(...)`：
 
 | 配置 | 默认值 | 用途 |
@@ -142,21 +144,19 @@ ViewHolder 与旧 Kotlin Android Extensions 保持一致：实现 `LayoutContain
 
 在 Studio 的 Settings → Plugins → Install Plugin from Disk 中选择 `build/distributions/` 下的 ZIP，按提示启用。
 
-当前 IDE 插件版本为 **0.1.28**，声明支持 IDE build **242–252.***，支持 Kotlin K1/K2 模式；实际安装以 Studio 的 build number 和插件兼容性检查为准。IDE 插件构建使用 JDK 21；Gradle 插件和 generator 使用 JDK 17 工具链，两者不要混淆。
+当前 IDE 插件版本为 **0.1.34**，声明支持 IDE build **242–252.***，支持 Kotlin K1/K2 模式；实际安装以 Studio 的 build number 和插件兼容性检查为准。IDE 插件构建使用 JDK 21；Gradle 插件和 generator 使用 JDK 17 工具链，两者不要混淆。
 
 完成首次生成后，保存 XML 会后台更新并刷新 IDE，无需因布局修改重启。正常 Build 会自动运行生成任务，无需手动菜单操作。修改 Gradle 插件配置后需重新构建或运行生成任务。
 
 ## Java/Kotlin：迁移 ButterKnife
 
-单文件：在项目树中右键一个 Java 或 Kotlin 文件，或在 Java/Kotlin 编辑器内右键，选择 **Migrate ButterKnife in This File...**（Tools → Synthetic Compatibility 菜单也有此入口）。从该文件出发自动查找所需基类、关联子类和绑定调用方，一起列入差异预览；无依赖时只转换当前文件。确认后应用，支持统一 Undo。无法安全转换的依赖仍会说明原因并跳过。
-
-批量：安装新版 Studio 插件后，打开 **Tools → Synthetic Compatibility → Migrate ButterKnife to findViewById...**，选择项目、模块或源码目录；同样会自动补齐 Java/Kotlin 基类、关联子类及绑定调用方。预览每个文件的差异和跳过原因，再点击应用；支持统一 Undo。
+安装新版 Studio 插件后，打开 **Tools → Synthetic Compatibility → Migrate ButterKnife to findViewById (Whole Project)...**，直接扫描整个项目，不再选择目录。Java/Kotlin 基类、关联子类及绑定调用方一起规划。预览每个文件的差异和跳过原因，再点击应用；支持统一 Undo。0.1.33 起移除单文件迁移菜单，Tools 中所有迁移选项都针对整个项目。
 
 - 扫描项目内非测试 Java/Kotlin 源文件，排除构建产物；请先完成 Gradle Sync 和索引。
 - 控件：`@BindView`、`@BindViews`，支持 `@Nullable`、`@Optional` 和 `R2` → `R`。
 - 资源：`@BindString`、`@BindBool`、`@BindInt`、`@BindArray`、`@BindDimen`、`@BindFloat`、`@BindColor`、`@BindDrawable`、`@BindBitmap`、`@BindAnim`、`@BindFont`。字体和 Drawable tint 需要项目已有 AndroidX Core 或 support-compat。
 - 事件：`@OnClick`、`@OnLongClick`、`@OnTouch`、`@OnFocusChange`、`@OnCheckedChanged`、`@OnEditorAction`、`@OnItemClick`、`@OnItemLongClick`、`@OnItemSelected`、`@OnTextChanged`、`@OnPageChange`，转为普通监听器，不再自动防抖。
-- 支持命名内部类/ViewHolder、多个类及多个绑定调用。父子类按继承关系一起规划，请选择包含基类和调用方的项目根目录。
+- 支持命名内部类/ViewHolder、多个类及多个绑定调用。父子类按继承关系一起规划，包含整个项目的基类和调用方。
 - `Unbinder` 字段/局部变量转为 `Runnable`，支持判空、赋 null、`EMPTY`；`unbind()` 转为 `run()`，解绑时清空控件、移除监听器并释放引用。
 - 无可解析绑定入口、匿名绑定类、跨文件 Unbinder API、未知注解等会显示具体原因。继承链中有无法转换的类时，相关类一起跳过，其他文件仍可处理。
 
@@ -170,7 +170,7 @@ ViewHolder 与旧 Kotlin Android Extensions 保持一致：实现 `LayoutContain
 
 - 已验证：AGP 8.7.2、Kotlin 2.1.20、Gradle 8.13、JDK 17；AGP 9 尚未验证。
 - 支持 `main.<layout>.*` 和 `.view.*`，按构建变体处理资源覆盖及 `layout-*`；不生成旧 debug/flavor 包名。
-- 布局共有的属性为非空类型，部分布局才有的属性为可空类型；不缓存 View。非空属性找不到控件或 Fragment View 不可用时抛异常。同名 ID 类型冲突时降为 `View`。
+- 布局共有的属性为非空类型，部分布局才有的属性为可空类型；不缓存 View。读取属性不做非空检查，找不到控件或 Fragment View 不可用时可返回 `null`，后续直接调用可能抛空指针异常。同名 ID 类型冲突时降为 `View`。
 - 支持实现 `kotlinx.android.extensions.LayoutContainer` 的自定义 Popup/ViewHolder，使用 `main.<layout>.*` 导入并直接访问控件 ID；通过当前 `containerView` 查找，不缓存。保留提供该接口的运行时依赖（例如原有 `kotlin-android-extensions-runtime`），生成器检测到接口后自动生成扩展；`.view.*` 仍用于 View 接收者。升级时同步 `generator/` 和 IDE 插件，再运行 `:app:generateSyntheticViews`。
 - include 与旧 synthetic 一致：父布局包只暴露自身 XML 的 ID，不递归导出子布局控件；子布局控件需导入其自己的布局包。include 自身的 ID 使用 View 类型；已知 merge 根布局不生成不存在的 include 容器 ID。可引用依赖模块布局，但不会为依赖布局生成控件扩展。
 - 暂不支持 `<fragment>` ID、旧缓存 API，以及直接导航 XML、跨 XML/Kotlin 重命名。
@@ -202,7 +202,9 @@ syntheticCompat {
 
 ## 系统返回键迁移
 
-单文件：在 Java/Kotlin 文件的项目树或编辑器右键菜单中选择 **Migrate Legacy System Back in This File...**，Tools → Synthetic Compatibility 中也有此入口。全项目入口扫描非测试 Java/Kotlin 源码，并排除生成和构建目录；先完成 Gradle Sync 和索引。
+0.1.34 将未重写返回的后代类也纳入业务方法名称冲突检查；多类文件中无法迁移的 Activity 会阻止相关继承链部分迁移。其他方法中的 `super.onBackPressed()` 及 Java `super::onBackPressed` 会通过带回调禁用及异常恢复保护的辅助方法执行，避免重新进入当前类的返回业务。
+
+全项目入口扫描非测试 Java/Kotlin 源码，并排除生成和构建目录；先完成 Gradle Sync 和索引。0.1.33 起移除单文件迁移菜单。
 
 Activity 自动迁移要求能解析为 `androidx.activity.ComponentActivity` 的子类（包括相应的 AppCompatActivity），且能解析 `OnBackPressedCallback`。仅继承平台 `android.app.Activity` 的类会提示人工处理。
 
@@ -210,7 +212,7 @@ Activity 自动迁移要求能解析为 `androidx.activity.ComponentActivity` �
 
 普通 Activity 的 `onBackPressed()` 重写会改为私有业务方法 `syntheticCompatHandleSystemBack()`（当前文件或继承层级重名时自动加后缀），同时移除 Java `@Override` / Kotlin `override`。新回调调用业务方法；旧系统由继承的 AndroidX 返回入口进入 dispatcher，不需要限定 API。类内直接调用及 Java 方法引用会同步改名，保留注册回调前的调用行为；类外原有调用仍可通过继承的返回入口执行。Kotlin 指向原函数的 `return@onBackPressed` 会同步更新，嵌套 lambda 自己的标签保持原义。默认返回保留保护，避免递归或重复执行。
 
-存在 Activity 父子类返回重写关系，或提取 Java `onKeyDown` BACK 分支时，仍保留旧重写作为兼容入口，以保留虚分派和旧按键行为。重新扫描可将已识别的旧 Activity 桥接升级为独立业务方法；已编辑的回调会进入人工处理报告。
+0.1.32 起，有子类或父类返回重写的 Java/Kotlin Activity 也会重命名返回业务方法并移除旧重写。继承链一起预览、应用，共用避开整条继承链重名的业务方法名，使用可重写的 `protected` 方法（Kotlin 父类使用 `open`、子类使用 `override`）。子类的 `super.onBackPressed()` 同步改为调用父类业务方法，父类内直接返回调用继续派发到子类，保留注册前的调用及条件返回行为。继承链中存在无法安全提取的文件时，一起进入人工处理报告。提取 Java `onKeyDown` BACK 分支时仍保留旧重写作为兼容入口。重新扫描可将已识别的旧 Activity 桥接升级为独立业务方法；已编辑的回调会进入人工处理报告。
 
 同文件的 Activity 返回重写和 View/Dialog 监听会一起迁移；提取的 `onKeyDown` BACK 分支仅在新 dispatcher 回调中执行，旧按键路径和直接 `onBackPressed()` 调用保留原有行为。监听内部重新绑定时，已注销的旧回调不会再次注册。重新扫描可升级 0.1.25 生成的回调模板；被手工修改、无法确认的旧模板会列入人工处理报告。
 
@@ -228,7 +230,7 @@ View/Dialog 新回调使用 Android 13 窗口 API，需要目标模块 `compileS
 | synthetic 导入标红或保存 XML 后没有更新 | 先运行模块生成任务，确认项目根目录 `.gradle/synthetic-compat/` 有模型文件；在 Studio 中信任项目，确认 IDE 插件已启用，并以对应 Gradle 根目录打开项目。 |
 | 生成代码中的 AndroidX Fragment 无法解析 | 添加项目所需的 AndroidX Fragment 依赖，或配置 `androidX.set(false)` 后重新生成。 |
 | 提示 `Unsupported synthetic IDE model` | 同步更新项目中的两个源码目录和 IDE 插件，然后重新运行生成任务。 |
-| 运行时提示 `Missing view` 或 Fragment View 不可用 | 在 Activity `setContentView` 后或 Fragment View 生命周期内访问；确认当前根 View 使用对应布局。生成属性不缓存 View。 |
+| 使用控件时发生空指针异常 | 在 Activity `setContentView` 后或 Fragment View 生命周期内访问；确认当前根 View 使用对应布局。生成属性不缓存 View，也不做非空检查。 |
 | 迁移入口不可用或出现无法解析的跳过原因 | 确认选择了对应 Java/Kotlin 文件、项目已完成 Gradle Sync 和索引，并按差异预览或人工报告中的原因处理依赖和代码。 |
 
 ## 开发验证

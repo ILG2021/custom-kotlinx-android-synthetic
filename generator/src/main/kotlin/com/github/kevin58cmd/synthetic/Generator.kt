@@ -178,7 +178,7 @@ object Generator {
             require(it.matches(Regex("[A-Za-z_][A-Za-z0-9_.]*(<\\*(,\\s*\\*)*>)?"))) { "Invalid type override: $it" }
             return it
         }
-        require(tag.split('.').all { identifier.matches(it) }) { "Unsupported view class '$tag'; configure typeOverrides for generic views." }
+        require(tag.split('.', '$').all { identifier.matches(it) }) { "Unsupported view class '$tag'; expected a qualified class name (nested classes may use $)." }
         val name = when {
             '.' in tag -> tag
             tag == "WebView" -> "android.webkit.WebView"
@@ -194,15 +194,22 @@ object Generator {
         appendLine("@file:Suppress(\"DEPRECATION\")")
         appendLine("package kotlinx.android.synthetic.main.${quoted(layout)}${if (viewOnly) ".view" else ""}")
         appendLine()
+        if (views.keys.any { it !in optional }) {
+            // An unbounded type parameter allows null through without a runtime non-null assertion.
+            appendLine("@Suppress(\"UNCHECKED_CAST\")")
+            appendLine("private fun <T> syntheticCompatView(value: Any?): T = value as T")
+            appendLine()
+        }
         val receivers = if (viewOnly) listOf("android.view.View" to "this") else buildList {
             add("android.app.Activity" to "this")
             add("android.app.Dialog" to "this")
-            if (spec.androidX) add("androidx.fragment.app.Fragment" to "requireView()")
-            if (spec.platformFragments) add("android.app.Fragment" to "checkNotNull(view) { \"Fragment view is not available\" }")
+            if (spec.androidX) add("androidx.fragment.app.Fragment" to "view")
+            if (spec.platformFragments) add("android.app.Fragment" to "view")
             if (layoutContainers) add("kotlinx.android.extensions.LayoutContainer" to "containerView")
         }
         val namespace = spec.namespace.split('.').joinToString(".", transform = ::quoted)
         for ((receiver, root) in receivers) {
+            val nullableRoot = root == "view" || root == "containerView"
             for ((id, type) in views.entries.sortedBy { it.key.name }) {
                 val r = if (id.framework) "android.R" else "$namespace.R"
                 // Preserve ID case in JVM names (foo/Foo would otherwise both become getFoo).
@@ -210,16 +217,16 @@ object Generator {
                 appendLine("val $receiver.${quoted(id.name)}: $type${if (id in optional) "?" else ""}")
                 if (id in optional && !id.framework) {
                     appendLine("    get() {")
-                    appendLine("        val root = $root${if (receiver == "kotlinx.android.extensions.LayoutContainer") " ?: return null" else ""}")
+                    appendLine("        val root = $root${if (nullableRoot) " ?: return null" else ""}")
                     appendLine("        val context = ${if (receiver == "android.app.Activity") "root" else "root.context"}")
                     appendLine("        val resources = context.resources")
                     appendLine("        val id = resources.getIdentifier(\"${id.name}\", \"id\", \"${spec.namespace}\").let { if (it != 0) it else resources.getIdentifier(\"${id.name}\", \"id\", context.packageName) }")
                     appendLine("        return if (id == 0) null else root.findViewById<$type>(id)")
                     appendLine("    }")
                 } else if (id in optional) {
-                    appendLine("    get() = $root${if (receiver == "kotlinx.android.extensions.LayoutContainer") "?" else ""}.findViewById<$type>($r.id.${quoted(id.name)})")
+                    appendLine("    get() = $root${if (nullableRoot) "?" else ""}.findViewById<$type>($r.id.${quoted(id.name)})")
                 } else {
-                    appendLine("    get() = checkNotNull($root${if (receiver == "kotlinx.android.extensions.LayoutContainer") "?" else ""}.findViewById<$type>($r.id.${quoted(id.name)})) { \"Missing view '${id.name}' from layout '$layout'\" }")
+                    appendLine("    get() = syntheticCompatView($root${if (nullableRoot) "?" else ""}.findViewById<$type>($r.id.${quoted(id.name)}))")
                 }
                 appendLine()
             }

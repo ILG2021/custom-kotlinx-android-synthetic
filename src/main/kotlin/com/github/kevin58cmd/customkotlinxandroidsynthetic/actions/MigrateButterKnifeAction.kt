@@ -10,14 +10,14 @@ import com.intellij.diff.requests.SimpleDiffRequest
 import com.intellij.diff.requests.MessageDiffRequest
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
+import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.command.WriteCommandAction
-import com.intellij.openapi.fileChooser.FileChooser
-import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.progress.ProgressIndicator
 import com.intellij.openapi.progress.Task
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.project.DumbService
 import com.intellij.openapi.roots.ProjectFileIndex
 import com.intellij.openapi.roots.GeneratedSourcesFilter
 import com.intellij.openapi.ui.DialogWrapper
@@ -31,27 +31,25 @@ import java.awt.BorderLayout
 import java.awt.Dimension
 import javax.swing.*
 
-open class MigrateButterKnifeAction : AnAction() {
-    protected open val includeRelatedFiles: Boolean = true
+class MigrateButterKnifeAction : AnAction() {
+    override fun getActionUpdateThread() = ActionUpdateThread.BGT
 
-    protected open fun selectTarget(event: AnActionEvent): VirtualFile? {
-        val project = event.project ?: return null
-        val descriptor = FileChooserDescriptorFactory.createSingleFolderDescriptor().withTitle("选择迁移目录（项目、模块或源码目录）")
-        return FileChooser.chooseFile(descriptor, project, event.getData(com.intellij.openapi.actionSystem.CommonDataKeys.VIRTUAL_FILE)?.let { if (it.isDirectory) it else it.parent })
+    override fun update(event: AnActionEvent) {
+        event.presentation.isEnabled = event.project?.let { !DumbService.isDumb(it) } == true
     }
 
     override fun actionPerformed(event: AnActionEvent) {
         val project = event.project ?: return
-        val folder = selectTarget(event) ?: return
+        if (DumbService.isDumb(project)) {
+            Messages.showInfoMessage(project, "请等待项目索引和 Gradle Sync 完成后再迁移。", "ButterKnife 迁移")
+            return
+        }
         PsiDocumentManager.getInstance(project).commitAllDocuments()
         object : Task.Backgroundable(project, "扫描 ButterKnife Java/Kotlin 用法", true) {
             val results = mutableListOf<Entry>()
             override fun run(indicator: ProgressIndicator) {
-                val seedFiles = ReadAction.compute<List<VirtualFile>, RuntimeException> {
-                    collectMigrationFiles(project, folder) { indicator.checkCanceled() }.toSet().toList()
-                }
                 val files = ReadAction.compute<List<VirtualFile>, RuntimeException> {
-                    collectMigrationFiles(project, if (includeRelatedFiles) null else folder) { indicator.checkCanceled() }
+                    collectMigrationFiles(project, null) { indicator.checkCanceled() }
                 }
                 val candidates = files.mapNotNull { file ->
                     indicator.checkCanceled()
@@ -63,27 +61,16 @@ open class MigrateButterKnifeAction : AnAction() {
                         }
                     }
                 }
-                val scope = if (includeRelatedFiles) {
-                    val selected = candidates.filter { it.virtualFile in seedFiles }
-                    if (selected.size == candidates.size) candidates else {
-                        val related = linkedSetOf<PsiFile>()
-                        selected.forEach { seed ->
-                            indicator.checkCanceled()
-                            if (seed !in related) related += MixedButterKnifeMigration.relatedFiles(seed, candidates)
-                        }
-                        related.toList()
-                    }
-                } else candidates
-                MixedButterKnifeMigration.planBatch(scope).forEach { (file, result) -> results += Entry(file.virtualFile, result) }
+                MixedButterKnifeMigration.planBatch(candidates).forEach { (file, result) -> results += Entry(file.virtualFile, result) }
             }
             override fun onSuccess() {
                 if (project.isDisposed) return
                 if (results.isEmpty()) {
-                    Messages.showInfoMessage(project, "所选范围的非测试 Java/Kotlin 源码中没有找到 ButterKnife 用法。请先完成 Gradle Sync。", "ButterKnife 迁移")
+                    Messages.showInfoMessage(project, "整个项目的非测试 Java/Kotlin 源码中没有找到 ButterKnife 用法。请先完成 Gradle Sync。", "ButterKnife 迁移")
                     return
                 }
                 val entries = results.sortedBy { it.file.path }
-                if (!Preview(project, entries, if (includeRelatedFiles) folder else null).showAndGet()) return
+                if (!Preview(project, entries).showAndGet()) return
                 apply(project, entries.filter { it.result.after != null })
             }
             override fun onThrowable(error: Throwable) {
@@ -127,10 +114,10 @@ open class MigrateButterKnifeAction : AnAction() {
         override fun toString(): String = "${if (result.after == null) "[跳过]" else "[转换]"} ${file.path}"
     }
 
-    private class Preview(project: Project, entries: List<Entry>, selected: VirtualFile?) : DialogWrapper(project) {
+    private class Preview(project: Project, entries: List<Entry>) : DialogWrapper(project) {
         private val panel = JPanel(BorderLayout(8, 8))
         init {
-            title = "ButterKnife 迁移预览"
+            title = "全项目 ButterKnife 迁移预览"
             setOKButtonText("应用 ${entries.count { it.result.after != null }} 个文件的改动")
             isOKActionEnabled = entries.any { it.result.after != null }
             val list = JList(entries.toTypedArray())
@@ -149,7 +136,7 @@ open class MigrateButterKnifeAction : AnAction() {
             }
             val split = JSplitPane(JSplitPane.VERTICAL_SPLIT, JScrollPane(list), diff.component)
             split.resizeWeight = 0.25
-            panel.add(JLabel(if (selected != null && entries.size > 1) "从 ${selected.name} 找到 ${entries.size} 个相关文件（含基类、子类或调用方）；请逐项预览，应用后可统一撤销。" else "仅转换可可靠识别的文件；跳过原因见下方。应用后可统一撤销。"), BorderLayout.NORTH)
+            panel.add(JLabel("扫描整个项目的非测试 Java/Kotlin 源码；跳过原因见下方。应用后可统一撤销。"), BorderLayout.NORTH)
             panel.add(split, BorderLayout.CENTER)
             panel.add(JScrollPane(details), BorderLayout.SOUTH)
             panel.preferredSize = Dimension(1100, 750)

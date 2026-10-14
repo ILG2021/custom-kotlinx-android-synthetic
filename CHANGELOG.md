@@ -3,7 +3,15 @@
 # custom-kotlinx-android-synthetic Changelog
 
 ## [Unreleased]
+### Changed
+- Remove the ButterKnife and system-back single-file menu entries; make every remaining Tools migration cover the whole project, including ButterKnife without a directory picker (0.1.33).
+- Extract Java/Kotlin Activity back overrides throughout source inheritance chains, rename child super calls to protected parent handlers, and preview related classes together from either migration entry point (0.1.32).
+- Remove runtime non-null checks from generated view getters, retaining existing property types and allowing missing views or unavailable Fragment/container roots to return null.
+- Place Groovy Parcelize apply declarations immediately after apply plugin: 'com.android.application', normalizing existing direct declarations on rescan (0.1.31).
+- Scan the whole project for legacy Parcelize migration without a directory picker, retaining module Gradle previews and global undo (0.1.30).
 ### Fixed
+- Check handler name collisions in all descendants, block parent extraction when multi-class child files require manual migration, and guard Java/Kotlin super-back calls outside the extracted handler against dispatcher reentry (0.1.34).
+- Support nested view binary names such as SearchView$SearchAutoComplete, rendering Kotlin source names while preserving dependency and Java-source generic inference (0.1.29).
 - Preserve Java bound/unbound onBackPressed method references, resolve Kotlin return-label targets before renaming, and avoid extracted handler name collisions with superclass members (0.1.28).
 - Fix system-back migration for exhaustive Java BACK branches, mixed Activity/window handlers and listener replacement during callbacks; preserve legacy key and direct onBackPressed behavior, and upgrade recognized 0.1.25 generated bridges on rescan (0.1.26).
 ### Added

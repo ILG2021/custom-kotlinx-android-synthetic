@@ -18,8 +18,11 @@ internal class ViewTypes(private val classpath: List<Path>, javaSourceRoots: Lis
     fun contains(name: String): Boolean = sources.parameters(name) != null || findClass(name) != null
 
     fun resolve(name: String): String = cache.getOrPut(name) {
-        sources.parameters(name)?.let { return@getOrPut projected(name, it) }
-        val bytes = findClass(name) ?: return@getOrPut name
+        // XML uses JVM binary names for nested classes; Kotlin and Java source use dots.
+        // Keep the binary name for classpath lookup so generic signatures are still found.
+        val sourceName = name.replace('$', '.')
+        sources.parameters(sourceName)?.let { return@getOrPut projected(sourceName, it) }
+        val bytes = findClass(name) ?: return@getOrPut sourceName
         var parameters = 0
         ClassReader(bytes).accept(object : ClassVisitor(Opcodes.ASM9) {
             override fun visit(version: Int, access: Int, internalName: String?, signature: String?, superName: String?, interfaces: Array<out String>?) {
@@ -28,7 +31,7 @@ internal class ViewTypes(private val classpath: List<Path>, javaSourceRoots: Lis
                 })
             }
         }, ClassReader.SKIP_CODE or ClassReader.SKIP_DEBUG or ClassReader.SKIP_FRAMES)
-        projected(name, parameters)
+        projected(sourceName, parameters)
     }
 
     private fun projected(name: String, parameters: Int) =

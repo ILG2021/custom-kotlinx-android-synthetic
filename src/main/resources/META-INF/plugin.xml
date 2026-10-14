@@ -29,14 +29,7 @@
         </action>
         <action id="SyntheticCompat.MigrateParcelize"
                 class="com.github.kevin58cmd.customkotlinxandroidsynthetic.actions.MigrateParcelizeAction"
-                text="Migrate Legacy Parcelize..." description="Preview and migrate legacy Parcelize references in a project or directory">
-            <add-to-group group-id="SyntheticCompat.Tools" anchor="last"/>
-        </action>
-        <action id="SyntheticCompat.MigrateButterKnifeFile"
-                class="com.github.kevin58cmd.customkotlinxandroidsynthetic.actions.MigrateButterKnifeFileAction"
-                text="Migrate ButterKnife in This File..." description="Preview and migrate the selected Java or Kotlin file and required binding dependencies">
-            <add-to-group group-id="ProjectViewPopupMenu" anchor="last"/>
-            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+                text="Migrate Legacy Parcelize (Whole Project)..." description="Preview and migrate legacy Parcelize references and module Gradle configuration across the whole project">
             <add-to-group group-id="SyntheticCompat.Tools" anchor="last"/>
         </action>
         <action id="SyntheticCompat.MigrateSystemBackProject"
@@ -45,17 +38,9 @@
                 description="Scan all project Java and Kotlin sources; preview migrations and cases requiring manual review">
             <add-to-group group-id="SyntheticCompat.Tools" anchor="last"/>
         </action>
-        <action id="SyntheticCompat.MigrateSystemBack"
-                class="com.github.kevin58cmd.customkotlinxandroidsynthetic.actions.MigrateSystemBackAction"
-                text="Migrate Legacy System Back in This File..."
-                description="Preview and migrate safe onBackPressed overrides; identify KEYCODE_BACK handlers requiring manual review">
-            <add-to-group group-id="ProjectViewPopupMenu" anchor="last"/>
-            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
-            <add-to-group group-id="SyntheticCompat.Tools" anchor="last"/>
-        </action>
         <action id="SyntheticCompat.MigrateButterKnife"
                 class="com.github.kevin58cmd.customkotlinxandroidsynthetic.actions.MigrateButterKnifeAction"
-                text="Migrate ButterKnife to findViewById..." description="Preview and migrate Java and Kotlin files in the selected directory or project">
+                text="Migrate ButterKnife to findViewById (Whole Project)..." description="Preview and migrate Java and Kotlin ButterKnife sources across the whole project">
             <add-to-group group-id="SyntheticCompat.Tools" anchor="last"/>
         </action>
     </actions>

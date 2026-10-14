@@ -22,6 +22,21 @@ class GeneratorTest {
     private fun spec(vararg layers: String) = GenerationSpec("sample", layers.map { listOf(root.resolve(it)) }, root.resolve("out"))
     private fun generated(layout: String = "screen") = Files.readString(root.resolve("out/kotlinx/android/synthetic/main/$layout/synthetic.kt"))
 
+    @Test fun `nested view names honor explicit overrides and reject malformed names`() {
+        val name = "androidx.appcompat.widget.SearchView\$SearchAutoComplete"
+        val layout = write("res/layout/screen.xml", xml("""<view class="$name" android:id="@+id/search"/>"""))
+        Generator.generate(spec("res"))
+        assertTrue(generated().contains("`search`: androidx.appcompat.widget.SearchView.SearchAutoComplete"))
+        Generator.generate(spec("res").copy(typeOverrides = mapOf(name to "android.widget.TextView")))
+        assertTrue(generated().contains("`search`: android.widget.TextView"))
+        val previous = generated()
+        for (invalid in listOf("sample.Outer\$", "sample.Outer\$\$Inner", "sample.Outer\$1")) {
+            Files.writeString(layout, xml("""<view class="$invalid" android:id="@+id/search"/>"""))
+            assertThrows(IllegalArgumentException::class.java) { Generator.generate(spec("res")) }
+            assertEquals(previous, generated())
+        }
+    }
+
     @Test fun `layout container dependency enables extensions and removal reconciles output`() {
         write("res/layout/screen.xml", xml("""<TextView android:id="@+id/title"/>"""))
         val dependency = root.resolve("runtime.jar")
@@ -218,7 +233,7 @@ class GeneratorTest {
     }
 
     @Test fun `generated Kotlin compiles and accesses current activity fragment and holder trees`() {
-        val bannerXml = """<com.zhouwei.mzbanner.MZBannerView android:id="@+id/banner"/>"""
+        val bannerXml = """<com.zhouwei.mzbanner.MZBannerView android:id="@+id/banner"/><view class="androidx.appcompat.widget.SearchView${'$'}SearchAutoComplete" android:id="@+id/search"/>"""
         write("res/layout/screen.xml", xml("""<TextView android:id="@+id/when"/><TextView android:id="@+id/foo"/><TextView android:id="@+id/Foo"/>""" + bannerXml))
         write("res/layout-fr/screen.xml", xml("""<TextView android:id="@+id/when"/><TextView android:id="@+id/foo"/><TextView android:id="@+id/Foo"/><TextView android:id="@+id/localizedOnly"/><androidx.constraintlayout.widget.Barrier android:id="@+id/barrier"/>""" + bannerXml))
         write("res/layout/activity_version_compare.xml", xml("""<include layout="@layout/layout_version_compare_bottom"/>"""))
@@ -263,6 +278,7 @@ class GeneratorTest {
         """.trimIndent())
         write("stubs/TextView.kt", "package android.widget; class TextView : android.view.View()")
         write("stubs/Banner.kt", "package com.zhouwei.mzbanner; class MZBannerView<T : Any> : android.view.View()")
+        write("stubs/SearchView.kt", "package androidx.appcompat.widget; class SearchView { class SearchAutoComplete : android.view.View() }")
         write("stubs/Barrier.kt", "package androidx.constraintlayout.widget; class Barrier : android.view.View()")
         write("stubs/Activity.kt", "package android.app; open class Activity : android.view.View() { val packageName = \"installed.app\" }; open class Dialog : android.view.View()")
         write("stubs/Fragment.kt", """
@@ -274,7 +290,7 @@ class GeneratorTest {
         """.trimIndent())
         write("stubs/RecyclerView.kt", "package androidx.recyclerview.widget; class RecyclerView { open class ViewHolder(val itemView: android.view.View) }")
         write("stubs/LayoutContainer.kt", "package kotlinx.android.extensions; interface LayoutContainer { val containerView: android.view.View? }")
-        write("stubs/R.kt", "package sample; object R { object id { const val `when` = 1; const val foo = 2; const val Foo = 3; const val banner = 4; const val bottomBar = 5 } }")
+        write("stubs/R.kt", "package sample; object R { object id { const val `when` = 1; const val foo = 2; const val Foo = 3; const val banner = 4; const val bottomBar = 5; const val search = 6 } }")
         write("stubs/Checks.kt", """
             package sample
             import kotlinx.android.synthetic.main.screen.*
@@ -299,6 +315,10 @@ class GeneratorTest {
                 activity.children[4] = banner
                 check(activity.banner === banner)
                 check((activity as android.view.View).banner === banner)
+                val search = androidx.appcompat.widget.SearchView.SearchAutoComplete()
+                activity.children[6] = search
+                check(activity.search === search)
+                check((activity as android.view.View).search === search)
                 activity.children[1] = first
                 activity.children[5] = first
                 check(activity.bottomBar === first)
@@ -320,7 +340,8 @@ class GeneratorTest {
                 fragment.view = android.view.View().apply { children[1] = first }
                 check(fragment.`when` === first)
                 fragment.view = null
-                check(runCatching { fragment.`when` }.isFailure)
+                check((fragment.`when` as android.view.View?) == null)
+                check(fragment.localizedOnly == null)
                 fragment.view = android.view.View().apply { children[1] = second }
                 check(fragment.`when` === second)
                 check(fragment.requireView().`when` === second)
@@ -333,11 +354,11 @@ class GeneratorTest {
                 check(holder.directAccess() === first)
                 holder.containerView = null
                 check(holder.localizedOnly == null)
-                check(runCatching { holder.directAccess() }.isFailure)
+                check((holder.directAccess() as android.view.View?) == null)
                 holder.containerView = fragment.requireView()
                 val popup = Popup()
                 check(popup.localizedOnly == null)
-                check(runCatching { popup.directAccess() }.isFailure)
+                check((popup.directAccess() as android.view.View?) == null)
                 popup.containerView = android.view.View().apply {
                     children[1] = first
                     children[42] = second
@@ -359,6 +380,10 @@ class GeneratorTest {
                 check(dialog.foo === first && dialog.Foo === second)
                 check(fragment.foo === first && fragment.Foo === second)
                 check(holder.foo === first && holder.Foo === second)
+                activity.children.remove(1)
+                check((activity.`when` as android.view.View?) == null)
+                check(((activity as android.view.View).`when` as android.view.View?) == null)
+                check(runCatching { activity.`when`.children }.isFailure)
             }
         """.trimIndent())
         val sources = Files.walk(root).use { it.filter { path -> path.toString().endsWith(".kt") }.map(Path::toString).toList() }

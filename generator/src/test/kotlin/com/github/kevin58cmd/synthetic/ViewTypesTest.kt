@@ -25,6 +25,33 @@ class ViewTypesTest {
         } }
     }.toByteArray()
 
+    @Test fun `nested binary names retain signature lookup and render source names`() {
+        val root = temporary.root.toPath()
+        val binaryName = "sample.Outer\$Middle\$Nested"
+        val entry = "sample/Outer\$Middle\$Nested.class"
+        val bytes = declaration(entry.removeSuffix(".class"), "<T:Ljava/lang/Object;>Lunavailable/BaseView;")
+        val classes = root.resolve("classes")
+        Files.createDirectories(classes.resolve("sample"))
+        Files.write(classes.resolve(entry), bytes)
+        val jar = root.resolve("nested.jar")
+        Files.write(jar, archive(mapOf(entry to bytes)))
+        val aar = root.resolve("nested.aar")
+        Files.write(aar, archive(mapOf("classes.jar" to archive(mapOf(entry to bytes)))))
+        for (classpath in listOf(classes, jar, aar)) {
+            assertEquals("sample.Outer.Middle.Nested<*>", ViewTypes(listOf(classpath)).resolve(binaryName))
+        }
+        assertEquals("sample.Outer.Middle.Nested", ViewTypes(emptyList()).resolve(binaryName))
+
+        val sourceRoot = root.resolve("java/sample")
+        Files.createDirectories(sourceRoot)
+        Files.writeString(sourceRoot.resolve("Outer.java"), """
+            package sample;
+            public class Outer { public static class Middle { public static class Nested<T, U> {} } }
+        """.trimIndent())
+        assertEquals("sample.Outer.Middle.Nested<*, *>",
+            ViewTypes(listOf(jar), listOf(root.resolve("java"))).resolve(binaryName))
+    }
+
     @Test fun `generic arity comes from declarations in directories jars and aars without loading classes`() {
         val root = temporary.root.toPath()
         val single = declaration("sample/Single", "<T:Ljava/lang/Object;>Lunavailable/BaseView;")

@@ -18,6 +18,121 @@ import java.io.File
 
 class SystemBackMigrationTest : BasePlatformTestCase() {
 
+    fun testDescendantWithoutBackOverrideAvoidsHandlerCollision() {
+        val parent = myFixture.addFileToProject("Parent.java", java().text.replace("Screen", "Parent"))
+        val childSource = "class Child extends Parent { private void syntheticCompatHandleSystemBack() {} }"
+        val child = myFixture.addFileToProject("Child.java", childSource)
+        val plans = SystemBackMigration.planFiles(listOf(parent, child))
+        assertTrue(plans[parent]!!.after!!.contains("protected void syntheticCompatHandleSystemBack1()"))
+        compileJava(plans[parent]!!.after!!.replace("Parent", "Screen"), extraSources = mapOf("Child" to childSource.replace("Parent", "Screen")))
+    }
+
+    fun testSkippedMultiClassChildBlocksParentExtraction() {
+        val parent = myFixture.addFileToProject("Parent.java", java().text.replace("Screen", "Parent"))
+        val child = myFixture.addFileToProject("Child.java", """
+            class Child extends Parent { @Override public void onBackPressed() { finish(); } }
+            class Other extends androidx.activity.ComponentActivity { @Override public void onBackPressed() { finish(); } }
+        """.trimIndent())
+        val plans = SystemBackMigration.planFiles(listOf(parent, child))
+        assertNull(plans[child]!!.after)
+        assertNull("Must not extract a parent when a child override is skipped", plans[parent]!!.after)
+    }
+
+    fun testKotlinDescendantWithoutOverrideAvoidsHandlerCollision() {
+        val parent = myFixture.addFileToProject("Parent.kt", """
+            open class Parent : androidx.activity.ComponentActivity() {
+                override fun onBackPressed() { finish() }
+            }
+        """.trimIndent())
+        val child = myFixture.addFileToProject("Screen.kt", """
+            class Screen : Parent() { private fun syntheticCompatHandleSystemBack() {} }
+        """.trimIndent())
+        val plans = SystemBackMigration.planFiles(listOf(parent, child))
+        val parentAfter = plans[parent]!!.after!!
+        assertTrue(parentAfter.contains("protected open fun syntheticCompatHandleSystemBack1()"))
+        compileKotlinWindow(parentAfter + "\n" + child.text, windowStubs(), """
+            public class Main { public static void main(String[] args) {
+                Screen screen = new Screen(); screen.onCreate(null); screen.onBackPressed();
+                if (screen.finishes != 1) throw new AssertionError("parent handler lost");
+            } }
+        """.trimIndent())
+    }
+
+    fun testSkippedKotlinMultiClassChildBlocksParentExtraction() {
+        val parent = myFixture.addFileToProject("Parent.kt", """
+            open class Parent : androidx.activity.ComponentActivity() {
+                override fun onBackPressed() { finish() }
+            }
+        """.trimIndent())
+        val child = myFixture.addFileToProject("Children.kt", """
+            class Child : Parent() { override fun onBackPressed() { finish() } }
+            class Other : androidx.activity.ComponentActivity() { override fun onBackPressed() { finish() } }
+        """.trimIndent())
+        val plans = SystemBackMigration.planFiles(listOf(parent, child))
+        assertNull(plans[child]!!.after)
+        assertNull(plans[parent]!!.after)
+    }
+
+    fun testSuperCallOutsideHandlerDoesNotDispatchChildAgain() {
+        val parent = myFixture.addFileToProject("Parent.java", java("parents++; super.onBackPressed();", extra = "int parents;").text.replace("Screen", "Parent"))
+        val child = myFixture.addFileToProject("Child.java", """
+            class Child extends Parent {
+                int children;
+                @Override public void onBackPressed() { children++; super.onBackPressed(); }
+                void parentOnlyBack() { super.onBackPressed(); }
+                Runnable parentBack = super::onBackPressed;
+            }
+        """.trimIndent())
+        val plans = SystemBackMigration.planFiles(listOf(parent, child))
+        compileJava(plans[child]!!.after!!.replace("Child", "Screen"), """
+            public class Main { public static void main(String[] args) {
+                Screen screen = new Screen(); screen.parentOnlyBack(); screen.onCreate(null);
+                screen.parentOnlyBack(); screen.parentBack.run();
+                if (screen.children != 0 || screen.parents != 3 || screen.finishes != 3)
+                    throw new AssertionError("children=" + screen.children + " parents=" + screen.parents + " finishes=" + screen.finishes);
+                if (!screen.getOnBackPressedDispatcher().hasEnabledCallbacks()) throw new AssertionError("guards not restored");
+            } }
+        """.trimIndent(), mapOf("Parent" to plans[parent]!!.after!!))
+    }
+
+    fun testKotlinSuperOutsideHandlerPreservesDefaultAndRestoresAfterException() {
+        val parent = myFixture.addFileToProject("Parent.kt", """
+            open class Parent : androidx.activity.ComponentActivity() {
+                var parents = 0
+                var fail = false
+                override fun onBackPressed() { parents++; if (fail) error("back failed"); super.onBackPressed() }
+            }
+        """.trimIndent())
+        val child = myFixture.addFileToProject("Screen.kt", """
+            class Screen : Parent() {
+                var children = 0
+                override fun onBackPressed() { children++; super.onBackPressed() }
+                fun parentOnlyBack() { super.onBackPressed() }
+            }
+        """.trimIndent())
+        val plans = SystemBackMigration.planFiles(listOf(parent, child))
+        compileKotlinWindow(plans[parent]!!.after!! + "\n" + plans[child]!!.after!!, windowStubs(), """
+            public class Main { public static void main(String[] args) {
+                Screen screen = new Screen(); screen.parentOnlyBack(); screen.onCreate(null); screen.parentOnlyBack();
+                if (screen.getChildren() != 0 || screen.getParents() != 2 || screen.finishes != 2) throw new AssertionError("super changed");
+                screen.setFail(true);
+                try { screen.parentOnlyBack(); throw new AssertionError("exception swallowed"); } catch (IllegalStateException expected) {}
+                screen.setFail(false); screen.getOnBackPressedDispatcher().onBackPressed();
+                if (screen.getChildren() != 1 || screen.getParents() != 4 || screen.finishes != 3) throw new AssertionError("guards not restored");
+            } }
+        """.trimIndent())
+    }
+
+    fun testSuperOutsideLeafHandlerBypassesNewCallback() {
+        val after = migrated(kotlin("calls++", extra = "var calls = 0; fun defaultBack() { super.onBackPressed() }"))
+        compileKotlinWindow(after, windowStubs(), """
+            public class Main { public static void main(String[] args) {
+                Screen screen = new Screen(); screen.onCreate(null); screen.defaultBack();
+                if (screen.getCalls() != 0 || screen.finishes != 1) throw new AssertionError("default entered callback");
+            } }
+        """.trimIndent())
+    }
+
     fun testExtractedNestedLabelPreservesLocalReturn() {
         val stubs = windowStubs()
         val file = kotlin("""
@@ -68,7 +183,7 @@ class SystemBackMigrationTest : BasePlatformTestCase() {
         """.trimIndent()))
         assertTrue(after.contains("this::syntheticCompatHandleSystemBack"))
         assertTrue(after.contains("Screen::syntheticCompatHandleSystemBack"))
-        assertTrue(after.contains("super::onBackPressed"))
+        assertTrue(after, after.contains("Screen.this::syntheticCompatCallSuperSystemBack"))
         assertTrue(after.contains("new androidx.activity.ComponentActivity()::onBackPressed"))
         compileJava(after, """
             public class Main { public static void main(String[] args) {
@@ -591,11 +706,12 @@ class SystemBackMigrationTest : BasePlatformTestCase() {
         migrated(myFixture.configureByText("Screen.java", source))
     }
 
-    fun testActivityWithSubclassPreservesVirtualDispatchAndDirectSuperCalls() {
-        val parent = myFixture.addFileToProject("Parent.java", java().text.replace("Screen", "Parent"))
+    fun testActivityWithSubclassWithoutOverrideIsExtracted() {
+        val parent = myFixture.addFileToProject("Parent.java", java("calls++; super.onBackPressed();", extra = "int calls;").text.replace("Screen", "Parent"))
         addJavaClass("class Child extends Parent {}")
         val after = migrated(parent).replace("Parent", "Screen")
-        assertTrue(after.contains("guarded system back override"))
+        assertFalse(after.contains("public void onBackPressed()"))
+        assertTrue(after.contains("protected void syntheticCompatHandleSystemBack()"))
         compileJava(after, """
             public class Main {
                 public static void main(String[] args) {
@@ -605,7 +721,7 @@ class SystemBackMigrationTest : BasePlatformTestCase() {
                     if (child.calls != 2 || child.finishes != 2) throw new AssertionError("virtual dispatch duplicated");
                 }
             }
-        """.trimIndent(), mapOf("Child" to "class Child extends Screen { int calls; @Override public void onBackPressed() { calls++; super.onBackPressed(); } }"))
+        """.trimIndent(), mapOf("Child" to "class Child extends Screen {}"))
     }
 
     fun testInitializationBeforeSuperOnCreateIsPreserved() {
@@ -627,9 +743,12 @@ class SystemBackMigrationTest : BasePlatformTestCase() {
                 @Override public void onBackPressed() { children++; super.onBackPressed(); }
             }
         """.trimIndent())
-        val parentAfter = SystemBackMigration.plan(parent)!!.after!!
-        putSource("Parent.java", parentAfter)
-        val childAfter = migrated(child).replace("Child", "Screen")
+        val plans = SystemBackMigration.planFiles(listOf(child, parent))
+        val parentAfter = plans[parent]!!.after!!
+        val childAfter = plans[child]!!.after!!.replace("Child", "Screen")
+        assertFalse(parentAfter.contains("public void onBackPressed()"))
+        assertFalse(childAfter.contains("public void onBackPressed()"))
+        assertTrue(childAfter.contains("super.syntheticCompatHandleSystemBack()"))
         compileJava(childAfter, """
             public class Main {
                 public static void main(String[] args) {
@@ -641,6 +760,92 @@ class SystemBackMigrationTest : BasePlatformTestCase() {
                 }
             }
         """.trimIndent(), mapOf("Parent" to parentAfter))
+    }
+
+    fun testKotlinHierarchyPreservesDirectCallsBeforeCreateAndConditionalSuper() {
+        val parent = myFixture.addFileToProject("Parent.kt", """
+            open class Parent : androidx.activity.ComponentActivity() {
+                var parents = 0
+                override fun onBackPressed() { parents++; super.onBackPressed() }
+                fun parentToolbarBack() { onBackPressed() }
+            }
+        """.trimIndent())
+        val child = myFixture.addFileToProject("Screen.kt", """
+            class Screen : Parent() {
+                var children = 0
+                var allow = false
+                override fun onBackPressed() { children++; if (allow) super.onBackPressed() }
+                fun toolbarBack() { onBackPressed() }
+            }
+        """.trimIndent())
+        val plans = SystemBackMigration.planFiles(listOf(child, parent))
+        val parentAfter = plans[parent]!!.after!!
+        val childAfter = plans[child]!!.after!!
+        assertFalse(parentAfter.contains("override fun onBackPressed()"))
+        assertFalse(childAfter.contains("override fun onBackPressed()"))
+        assertTrue(childAfter.contains("super.syntheticCompatHandleSystemBack()"))
+        compileKotlinWindow(parentAfter + "\n" + childAfter, windowStubs(), """
+            public class Main { public static void main(String[] args) {
+                Screen screen = new Screen();
+                screen.parentToolbarBack();
+                if (screen.getChildren() != 1 || screen.getParents() != 0 || screen.finishes != 0) throw new AssertionError("blocked back changed");
+                screen.setAllow(true); screen.toolbarBack();
+                if (screen.getChildren() != 2 || screen.getParents() != 1 || screen.finishes != 1) throw new AssertionError("pre-create super lost");
+                screen.onCreate(null); screen.onBackPressed(); screen.getOnBackPressedDispatcher().onBackPressed();
+                if (screen.getChildren() != 4 || screen.getParents() != 3 || screen.finishes != 3) throw new AssertionError("hierarchy duplicated");
+                if (!screen.getOnBackPressedDispatcher().hasEnabledCallbacks()) throw new AssertionError("callbacks not restored");
+            } }
+        """.trimIndent())
+    }
+
+    fun testMixedHierarchyWithAlreadyExtractedJavaParent() {
+        val parent = myFixture.addFileToProject("Parent.java", java("parents++; super.onBackPressed();", extra = "public int parents;").text.replace("Screen", "Parent").replace("class Parent", "public class Parent"))
+        val child = myFixture.addFileToProject("Screen.kt", """
+            class Screen : Parent() {
+                var children = 0
+                override fun onBackPressed() { children++; super.onBackPressed() }
+            }
+        """.trimIndent())
+        val parentAfter = SystemBackMigration.planFiles(listOf(parent, child))[parent]!!.after!!
+        putSource("Parent.java", parentAfter)
+        val childAfter = migrated(child)
+        assertTrue(childAfter.contains("protected override fun syntheticCompatHandleSystemBack()"))
+        compileKotlinWindow(childAfter, windowStubs() + ("Parent" to parentAfter), """
+            public class Main { public static void main(String[] args) {
+                Screen screen = new Screen(); screen.onCreate(null);
+                screen.onBackPressed(); screen.getOnBackPressedDispatcher().onBackPressed();
+                if (screen.parents != 2 || screen.getChildren() != 2 || screen.finishes != 2) throw new AssertionError("mixed hierarchy duplicated");
+            } }
+        """.trimIndent())
+    }
+
+    fun testHierarchyWithEditedCallbackIsNotPartiallyExtracted() {
+        val parent = myFixture.addFileToProject("Parent.java", java().text.replace("Screen", "Parent"))
+        val source = "class Child extends Parent { @Override public void onBackPressed() { super.onBackPressed(); } }"
+        val child = myFixture.addFileToProject("Child.java", source)
+        val old = SystemBackMigration.planLegacy(child)!!.after!!.replace("setEnabled(true);", "setEnabled(true); finish();")
+        putSource("Child.java", old)
+        val plans = SystemBackMigration.planFiles(listOf(parent, child))
+        assertNull(plans[parent]!!.after)
+        assertNull(plans[child]!!.after)
+    }
+
+    fun testSingleFileScanIncludesHierarchyAndKeepsOneCollisionFreeName() {
+        val parent = myFixture.addFileToProject("Parent.java", java("super.onBackPressed();").text.replace("Screen", "Parent"))
+        val child = myFixture.addFileToProject("Child.java", """
+            class Child extends Parent {
+                private void syntheticCompatHandleSystemBack() {}
+                @Override public void onBackPressed() { super.onBackPressed(); }
+            }
+        """.trimIndent())
+        myFixture.addFileToProject("Other.java", java().text.replace("Screen", "Other"))
+        val entries = MigrateSystemBackProjectAction.scan(project, selectedFile = child.virtualFile)
+        assertEquals(setOf(parent.virtualFile, child.virtualFile), entries.map { it.file }.toSet())
+        val parentAfter = entries.single { it.file == parent.virtualFile }.result.after!!
+        val childAfter = entries.single { it.file == child.virtualFile }.result.after!!
+        assertTrue(parentAfter.contains("protected void syntheticCompatHandleSystemBack1()"))
+        assertTrue(childAfter.contains("super.syntheticCompatHandleSystemBack1()"))
+        compileJava(childAfter.replace("Child", "Screen"), extraSources = mapOf("Parent" to parentAfter))
     }
 
     fun testLibraryImplementationIsNotScannedAsApplicationHelper() {

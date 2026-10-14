@@ -25,6 +25,83 @@ object SystemBackMigration {
         return SystemBackHandlerExtraction.plan(file, result)
     }
 
+    /** Plan against the original snapshot: superclass handlers must exist in this batch. */
+    fun planFiles(files: List<PsiFile>): Map<PsiFile, Result> {
+        val legacy = files.associateWith { planLegacy(it) }
+        val owners = files.mapNotNull { file -> SystemBackHandlerExtraction.owner(file)?.let { file to it } }.toMap()
+        val activities = files.associateWith { SystemBackHandlerExtraction.activities(it) }
+        val ambiguous = owners.values.groupBy { it.qualifiedName }.filterValues { it.size > 1 }.keys
+        var handlers = owners.filter { (file, _) ->
+            val result = legacy[file]
+            (result?.after ?: file.text).contains("// SyntheticCompat system back bridge") &&
+                !(result != null && result.after == null) && owners[file]?.qualifiedName !in ambiguous
+        }.mapNotNull { (file, owner) -> owner.qualifiedName?.let { it to SystemBackHandlerExtraction.name(file, owner) } }.toMap()
+        // All overrides in a connected hierarchy share one collision-free virtual name.
+        // This also preserves a parent's toolbar/helper call dispatching into its child
+        // before lifecycle callbacks have been registered.
+        val pending = handlers.keys.toMutableSet()
+        val named = handlers.toMutableMap()
+        while (pending.isNotEmpty()) {
+            val group = mutableSetOf(pending.first())
+            do {
+                val before = group.size
+                pending.filter { name ->
+                    val owner = owners.values.single { it.qualifiedName == name }
+                    group.any { member ->
+                        val other = owners.values.single { it.qualifiedName == member }
+                        owner == other || InheritanceUtil.isInheritor(owner, member) || InheritanceUtil.isInheritor(other, name)
+                    }
+                }.forEach { group += it }
+            } while (group.size != before)
+            val inherited = owners.values.filter { it.qualifiedName in group }
+                .mapNotNull { SystemBackHandlerExtraction.parentHandler(it, emptyMap()) }.distinct().singleOrNull()
+            var helper = inherited ?: "syntheticCompatHandleSystemBack"
+            var suffix = 1
+            val family = owners.values.filter { it.qualifiedName in group }.flatMap { SystemBackHandlerExtraction.family(it) }.distinct()
+            while (inherited == null && family.any { owner ->
+                    Regex("\\b${Regex.escape(helper)}\\b").containsMatchIn(owner.navigationElement.containingFile.text) ||
+                        owner.findMethodsByName(helper, true).isNotEmpty() }) {
+                helper = "syntheticCompatHandleSystemBack" + suffix++
+            }
+            group.forEach { named[it] = helper }
+            pending.removeAll(group)
+        }
+        handlers = named
+        val candidates = handlers.keys
+        while (true) {
+            val results = files.mapNotNull { file ->
+                val old = legacy[file]
+                val result = if (owners[file] != null && owners[file]?.qualifiedName in ambiguous) {
+                    Result(file.text, null, "存在同名 Activity 类型，无法唯一解析继承关系；请先处理重复类或源码配置。")
+                } else if (owners[file]?.qualifiedName in candidates && owners[file]?.qualifiedName !in handlers) {
+                    Result(file.text, null, "继承链中的返回方法无法一起安全提取；请先处理同一继承链的人工处理报告。")
+                } else if (old != null && old.after == null) old else SystemBackHandlerExtraction.plan(file, old, handlers)
+                result?.let { file to it }
+            }.toMap()
+            var successful = handlers.filter { (name, _) ->
+                val file = owners.entries.singleOrNull { it.value.qualifiedName == name }?.key
+                results[file]?.after?.contains("// SyntheticCompat extracted system back handler") == true
+            }
+            // Keep an entire connected source hierarchy together when one level cannot
+            // be extracted (edited bridges, key handlers, unresolved types, etc.).
+            val blocked = activities.filter { (file, _) ->
+                results[file]?.after?.contains("// SyntheticCompat extracted system back handler") != true
+            }.values.flatten().filter { owner -> owner.methods.any {
+                it.name == "onBackPressed" && it.parameterList.parametersCount == 0 && it.returnType == PsiTypes.voidType()
+            } }.toMutableSet()
+            do {
+                val before = blocked.size
+                owners.values.filter { owner -> blocked.any { other ->
+                    owner == other || InheritanceUtil.isInheritor(owner, other.qualifiedName ?: "") ||
+                        InheritanceUtil.isInheritor(other, owner.qualifiedName ?: "")
+                } }.forEach { blocked += it }
+            } while (blocked.size != before)
+            successful = successful.filterKeys { name -> blocked.none { it.qualifiedName == name } }
+            if (successful == handlers) return results
+            handlers = successful
+        }
+    }
+
     internal fun planLegacy(file: PsiFile): Result? {
         val specialized = SystemBackSpecialCases.plan(file)
         if (specialized.handled) return specialized.result
@@ -175,6 +252,7 @@ object SystemBackMigration {
         if (method.returnType != PsiTypes.voidType() || method.findSuperMethods().isEmpty()) return skip(file, "此方法不是可解析的 Activity.onBackPressed() 重写。")
         val body = method.body ?: return skip(file, "方法缺少方法体。")
         if (body.text.contains(GUARDED_OVERRIDE)) return null
+        val hasSuperBackCalls = references.any { it.referenceName == "onBackPressed" && it.qualifierExpression is PsiSuperExpression }
         val defaults = PsiTreeUtil.findChildrenOfType(body, PsiMethodCallExpression::class.java).filter {
             it.methodExpression.referenceName == "onBackPressed" && it.methodExpression.qualifierExpression is PsiSuperExpression &&
                 it.argumentList.expressions.isEmpty() && it.resolveMethod() != null && !deferred(it, body)
@@ -189,7 +267,7 @@ object SystemBackMigration {
         if (creates.isEmpty()) {
             if (references.any { it.referenceName in setOf("addCallback", "registerOnBackInvokedCallback") }) return skip(file, "已有返回回调注册，请人工确认回调优先级。")
             val offset = owner.rBrace?.textRange?.startOffset ?: return skip(file, "无法确定类的插入位置。")
-            if (defaults.isNotEmpty() || hasBackInheritance(owner)) return guardedDefault(file, body, offset, offset, owner.name!!, false, true, keyHandler)
+            if (hasSuperBackCalls || hasBackInheritance(owner)) return guardedDefault(file, body, offset, offset, owner.name!!, false, true, keyHandler)
             return insert(file, offset, createMethod(javaBridge(owner.name!!, true, keyHandler), false))
         }
         val create = creates.singleOrNull() ?: return skip(file, "未找到唯一且可解析的 onCreate(Bundle) 重写。")
@@ -209,7 +287,7 @@ object SystemBackMigration {
         if (call.methodExpression.referenceName != "onCreate" || call.methodExpression.qualifierExpression !is PsiSuperExpression || call.resolveMethod() == null) {
             return skip(file, "onCreate 的第一条语句不是可解析的 super.onCreate()。")
         }
-        if (defaults.isNotEmpty() || hasBackInheritance(owner)) return guardedDefault(file, body, statement.textRange.endOffset,
+        if (hasSuperBackCalls || hasBackInheritance(owner)) return guardedDefault(file, body, statement.textRange.endOffset,
             owner.rBrace?.textRange?.startOffset ?: return skip(file, "无法确定类的插入位置。"), owner.name!!, false, keyHandler = keyHandler)
         return insert(file, statement.textRange.endOffset, javaBridge(owner.name!!, true, keyHandler))
     }
@@ -232,6 +310,10 @@ object SystemBackMigration {
         if (resolvedBack == null || resolvedBack.returnType != PsiTypes.voidType() || resolvedBack.findSuperMethods().isEmpty()) return skip(file, "无法解析 Activity.onBackPressed() 重写。")
         val body = method.bodyExpression ?: return skip(file, "方法缺少方法体。")
         if (body.text.contains(GUARDED_OVERRIDE)) return null
+        val hasSuperBackCalls = references.any {
+            it.getReferencedName() == "onBackPressed" &&
+                ((it.parent as? KtCallExpression)?.parent as? KtDotQualifiedExpression)?.receiverExpression is KtSuperExpression
+        }
         val defaults = PsiTreeUtil.findChildrenOfType(body, KtCallExpression::class.java).filter {
             val qualified = it.parent as? KtDotQualifiedExpression
             val callee = it.calleeExpression as? KtNameReferenceExpression
@@ -246,7 +328,7 @@ object SystemBackMigration {
         if (creates.isEmpty()) {
             if (references.any { it.getReferencedName() in setOf("addCallback", "registerOnBackInvokedCallback") }) return skip(file, "已有返回回调注册，请人工确认回调优先级。")
             val offset = owner.body?.rBrace?.textRange?.startOffset ?: return skip(file, "无法确定类的插入位置。")
-            if (defaults.isNotEmpty() || hasBackInheritance(light)) return guardedDefault(file, body, offset, offset, name, true, true)
+            if (hasSuperBackCalls || hasBackInheritance(light)) return guardedDefault(file, body, offset, offset, name, true, true)
             return insert(file, offset, createMethod(kotlinBridge(name, true), true))
         }
         val create = creates.singleOrNull() ?: return skip(file, "未找到唯一的 onCreate(Bundle) 重写。")
@@ -265,7 +347,7 @@ object SystemBackMigration {
             }) return skip(file, "super.onCreate() 前存在提前返回，无法保证注册回调。")
         val call = statement.selectorExpression as? KtCallExpression
         if (statement.receiverExpression !is KtSuperExpression || (call?.calleeExpression as? KtNameReferenceExpression)?.getReferencedName() != "onCreate") return skip(file, "onCreate 的第一条语句不是 super.onCreate()。")
-        if (defaults.isNotEmpty() || hasBackInheritance(light)) return guardedDefault(file, body, statement.textRange.endOffset,
+        if (hasSuperBackCalls || hasBackInheritance(light)) return guardedDefault(file, body, statement.textRange.endOffset,
             owner.body?.rBrace?.textRange?.startOffset ?: return skip(file, "无法确定类的插入位置。"), name, true)
         return insert(file, statement.textRange.endOffset, kotlinBridge(name, true))
     }

@@ -8,10 +8,9 @@ import com.intellij.diff.DiffContentFactory
 import com.intellij.diff.requests.SimpleDiffRequest
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
+import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.command.WriteCommandAction
-import com.intellij.openapi.fileChooser.FileChooser
-import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.progress.ProgressIndicator
 import com.intellij.openapi.progress.Task
@@ -29,15 +28,14 @@ import javax.swing.*
 
 class MigrateParcelizeAction : AnAction() {
 
-    private fun selectTarget(event: AnActionEvent): VirtualFile? {
-        val project = event.project ?: return null
-        val descriptor = FileChooserDescriptorFactory.createSingleFolderDescriptor().withTitle("选择迁移目录（项目、模块或源码目录）")
-        return FileChooser.chooseFile(descriptor, project, event.getData(com.intellij.openapi.actionSystem.CommonDataKeys.VIRTUAL_FILE)?.let { if (it.isDirectory) it else it.parent })
+    override fun getActionUpdateThread() = ActionUpdateThread.BGT
+
+    override fun update(event: AnActionEvent) {
+        event.presentation.isEnabled = event.project != null
     }
 
     override fun actionPerformed(event: AnActionEvent) {
         val project = event.project ?: return
-        val folder = selectTarget(event) ?: return
         PsiDocumentManager.getInstance(project).commitAllDocuments()
         object : Task.Backgroundable(project, "扫描旧版 Parcelize 引用", true) {
             val results = mutableListOf<Entry>()
@@ -45,7 +43,7 @@ class MigrateParcelizeAction : AnAction() {
             override fun run(indicator: ProgressIndicator) {
                 ReadAction.run<RuntimeException> {
                     val manager = FileDocumentManager.getInstance()
-                    val sources = collectMigrationFiles(project, folder) { indicator.checkCanceled() }.mapNotNull { file ->
+                    val sources = collectMigrationFiles(project) { indicator.checkCanceled() }.mapNotNull { file ->
                         indicator.checkCanceled()
                         indicator.text2 = file.path
                         val psi = PsiManager.getInstance(project).findFile(file) as? KtFile ?: return@mapNotNull null
@@ -73,11 +71,11 @@ class MigrateParcelizeAction : AnAction() {
             override fun onSuccess() {
                 if (project.isDisposed) return
                 if (results.isEmpty()) {
-                    Messages.showInfoMessage(project, "所选范围的 Kotlin 源码中没有找到需要迁移的 Parcelize 引用或 Gradle 配置。请先完成 Gradle Sync。", "Parcelize 迁移")
+                    Messages.showInfoMessage(project, "整个项目的 Kotlin 源码中没有找到需要迁移的 Parcelize 引用或 Gradle 配置。请先完成 Gradle Sync。", "Parcelize 迁移")
                     return
                 }
                 val entries = results.sortedBy { it.file.path }
-                if (!Preview(project, entries, folder).showAndGet()) return
+                if (!Preview(project, entries).showAndGet()) return
                 apply(project, entries.filter { it.applicable }, buildSnapshots)
             }
             override fun onThrowable(error: Throwable) {
@@ -101,7 +99,7 @@ class MigrateParcelizeAction : AnAction() {
             return null
         }
 
-        internal fun collectMigrationFiles(project: Project, target: VirtualFile?, checkCanceled: () -> Unit = {}): List<VirtualFile> {
+        internal fun collectMigrationFiles(project: Project, checkCanceled: () -> Unit = {}): List<VirtualFile> {
             val index = ProjectFileIndex.getInstance(project)
             val found = mutableListOf<VirtualFile>()
             fun visit(file: VirtualFile): Boolean {
@@ -111,7 +109,7 @@ class MigrateParcelizeAction : AnAction() {
                     file.path.split('/').none { it in setOf("build", ".gradle", ".git", "generated") }) found += file
                 return true
             }
-            if (target == null) index.iterateContent { visit(it) } else if (target.isDirectory) index.iterateContentUnderDirectory(target) { visit(it) } else visit(target)
+            index.iterateContent { visit(it) }
             return found
         }
     }
@@ -136,7 +134,7 @@ class MigrateParcelizeAction : AnAction() {
         override fun toString(): String = "${if (applicable) "[转换]" else "[跳过]"} ${file.path}"
     }
 
-    private class Preview(project: Project, entries: List<Entry>, selected: VirtualFile?) : DialogWrapper(project) {
+    private class Preview(project: Project, entries: List<Entry>) : DialogWrapper(project) {
         private val panel = JPanel(BorderLayout(8, 8))
         init {
             title = "Parcelize 迁移预览"
@@ -154,7 +152,7 @@ class MigrateParcelizeAction : AnAction() {
             }
             val split = JSplitPane(JSplitPane.VERTICAL_SPLIT, JScrollPane(list), diff.component)
             split.resizeWeight = 0.25
-            panel.add(JLabel("${selected?.path}：共 ${entries.size} 个源码/Gradle 文件（含测试源码），应用后可统一撤销。"), BorderLayout.NORTH)
+            panel.add(JLabel("整个项目：共 ${entries.size} 个源码/Gradle 文件（含测试源码），应用后可统一撤销。"), BorderLayout.NORTH)
             panel.add(split, BorderLayout.CENTER)
             panel.add(JScrollPane(details), BorderLayout.SOUTH)
             panel.preferredSize = Dimension(1100, 750)

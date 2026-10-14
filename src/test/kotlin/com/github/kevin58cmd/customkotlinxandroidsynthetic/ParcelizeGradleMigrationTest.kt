@@ -4,6 +4,29 @@ import com.github.kevin58cmd.customkotlinxandroidsynthetic.migration.ParcelizeGr
 import junit.framework.TestCase
 
 class ParcelizeGradleMigrationTest : TestCase() {
+    fun testGroovyApplicationUsesApplyImmediatelyAfterAndroid() {
+        for (declaration in listOf("apply plugin: 'kotlin-android-extensions'", "apply plugin: 'kotlin-parcelize'",
+            "plugins { id 'kotlin-android-extensions' }", "plugins { id('org.jetbrains.kotlin.plugin.parcelize') }", "")) {
+            val source = "$declaration\napply plugin: 'com.android.application' // Android first\napply plugin: 'kotlin-android'\nandroid { compileSdk 34 }"
+            val result = ParcelizeGradleMigration.plan(source, false).after!!
+            assertTrue(result.contains("apply plugin: 'com.android.application' // Android first\napply plugin: 'kotlin-parcelize'\napply plugin: 'kotlin-android'"))
+            assertFalse(result.contains("kotlin-android-extensions"))
+            assertEquals(1, Regex("kotlin-parcelize").findAll(result).count())
+            assertEquals(result, ParcelizeGradleMigration.plan(result, false).after)
+        }
+    }
+
+    fun testGroovyApplicationOrderingWithCrLfAndSameLineStatements() {
+        val source = "apply plugin: 'com.android.application'\r\napply plugin: 'kotlin-android-extensions'\r\n"
+        val expected = "apply plugin: 'com.android.application'\r\napply plugin: 'kotlin-parcelize'\r\n"
+        assertEquals(expected, ParcelizeGradleMigration.plan(source, false).after)
+        assertEquals(expected, ParcelizeGradleMigration.plan(expected, false).after)
+        val inline = "apply plugin: 'com.android.application'; apply plugin: 'kotlin-android-extensions'"
+        val result = ParcelizeGradleMigration.plan(inline, false).after!!
+        assertTrue(result.startsWith("apply plugin: 'com.android.application';\napply plugin: 'kotlin-parcelize'"))
+        assertEquals(result, ParcelizeGradleMigration.plan(result, false).after)
+        assertNull(ParcelizeGradleMigration.plan("plugins { id 'kotlin-android-extensions' version '1.6.21' }\napply plugin: 'com.android.application'", false).after)
+    }
     fun testKotlinDslAndVersionArePreserved() {
         val source = "plugins {\n    id(\"org.jetbrains.kotlin.android.extensions\") version \"1.8.0\"\n}\n"
         val result = ParcelizeGradleMigration.plan(source, true)

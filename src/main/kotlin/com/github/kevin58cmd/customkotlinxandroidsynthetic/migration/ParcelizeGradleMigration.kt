@@ -9,6 +9,16 @@ object ParcelizeGradleMigration {
 
     fun plan(text: String, kotlinDsl: Boolean): Result {
         val tokens = lex(text) ?: return Result(text, null, "构建脚本包含无法识别的字符串或注释，请检查配置。")
+        // Groovy application modules keep Parcelize beside their Android apply declaration.
+        var scanDepth = 0
+        val androidApply = if (kotlinDsl) null else tokens.indices.firstOrNull { i ->
+            val token = tokens[i]
+            if (!token.string && token.value == "{") scanDepth++
+            if (!token.string && token.value == "}") scanDepth--
+            scanDepth == 0 && token.string && token.value == "com.android.application" &&
+                tokens.getOrNull(i - 1)?.value == ":" && tokens.getOrNull(i - 2)?.value == "plugin" &&
+                tokens.getOrNull(i - 3)?.value == "apply"
+        }
         val edits = mutableListOf<Triple<Int, Int, String>>()
         var depth = 0
         var pluginOpen: Token? = null
@@ -67,6 +77,23 @@ object ParcelizeGradleMigration {
             val applyFalse = tail.filter { !it.string && it.value !in setOf("(", ")", ".") }
                 .windowed(2).any { it[0].value == "apply" && it[1].value == "false" }
             if (applyFalse) { declarationsOnly = true; continue }
+            if (androidApply != null) {
+                // Remove existing direct declarations before inserting one in the requested order.
+                // A versioned plugins declaration may supply the plugin classpath; do not discard it.
+                if (id && tail.any { !it.string && it.value == "version" }) {
+                    return Result(text, null, "Parcelize/Extensions 使用显式插件版本，无法安全改为 apply plugin，请检查 Kotlin 插件 classpath 配置。")
+                }
+                val start = tokens[i - if (apply) 3 else if (previous == "(") 2 else 1].start
+                val close = if (previous == "(") tokens.getOrNull(i + 1)?.takeIf { it.value == ")" } else null
+                val end = close?.end ?: token.end
+                val lineStart = text.lastIndexOf('\n', start - 1) + 1
+                val lineEnd = text.indexOf('\n', end).let { if (it < 0) text.length else it }
+                if (text.substring(lineStart, start).isBlank() && text.substring(end, lineEnd).isBlank()) {
+                    edits += Triple(lineStart, if (lineEnd < text.length) lineEnd + 1 else lineEnd, "")
+                } else edits += Triple(start, end, "")
+                enabled = true
+                continue
+            }
             if (modernId) { enabled = true; modernEnabled = true }
             if (legacyId) {
                 // Replacing a versioned legacy declaration preserves its Kotlin version.
@@ -78,7 +105,16 @@ object ParcelizeGradleMigration {
         if (depth != 0) return Result(text, null, "构建脚本括号不完整。")
         if (legacyEnabled && modernEnabled) return Result(text, null, "旧插件和 Parcelize 同时启用，请先移除重复的 Android Extensions 配置。")
         if (declarationsOnly) return Result(text, null, "发现 apply false 的 Parcelize/Android Extensions 声明，请在实际模块中启用。")
-        if (!enabled) {
+        if (androidApply != null) {
+            val newline = if (text.contains("\r\n")) "\r\n" else "\n"
+            val token = tokens[androidApply]
+            val lineEnd = text.indexOf('\n', token.end).let { if (it < 0) text.length else it }
+            val suffix = text.substring(token.end, lineEnd).trim()
+            val end = if (suffix.isEmpty() || suffix.startsWith("//") || suffix == ";") {
+                if (lineEnd > 0 && text[lineEnd - 1] == '\r') lineEnd - 1 else lineEnd
+            } else tokens.getOrNull(androidApply + 1)?.takeIf { it.value == ";" }?.end ?: token.end
+            edits += Triple(end, end, "${newline}apply plugin: 'kotlin-parcelize'${if (end == text.length || end < lineEnd && text[end] != '\r') newline else ""}")
+        } else if (!enabled) {
             val newline = if (text.contains("\r\n")) "\r\n" else "\n"
             val declaration = if (kotlinDsl) "id(\"kotlin-parcelize\")" else "id 'kotlin-parcelize'"
             if (pluginOpen != null) {

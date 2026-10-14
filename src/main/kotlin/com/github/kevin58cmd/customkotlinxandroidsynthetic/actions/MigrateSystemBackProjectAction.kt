@@ -1,6 +1,8 @@
 package com.github.kevin58cmd.customkotlinxandroidsynthetic.actions
 
 import com.github.kevin58cmd.customkotlinxandroidsynthetic.migration.SystemBackMigration
+import com.github.kevin58cmd.customkotlinxandroidsynthetic.migration.SystemBackHandlerExtraction
+import com.intellij.psi.util.InheritanceUtil
 import com.intellij.diff.DiffContentFactory
 import com.intellij.diff.DiffManager
 import com.intellij.diff.requests.MessageDiffRequest
@@ -38,17 +40,21 @@ class MigrateSystemBackProjectAction : AnAction() {
 
     override fun actionPerformed(event: AnActionEvent) {
         val project = event.project ?: return
+        migrate(project)
+    }
+
+    internal fun migrate(project: Project, selectedFile: VirtualFile? = null) {
         if (DumbService.isDumb(project)) {
             Messages.showInfoMessage(project, "请等待项目索引和 Gradle Sync 完成后再迁移。", "全项目系统返回迁移")
             return
         }
         PsiDocumentManager.getInstance(project).commitAllDocuments()
-        object : Task.Backgroundable(project, "扫描全项目系统返回键处理", true) {
+        object : Task.Backgroundable(project, if (selectedFile == null) "扫描全项目系统返回键处理" else "扫描当前文件及返回继承链", true) {
             private var entries = emptyList<Entry>()
             private var report: Path? = null
 
             override fun run(indicator: ProgressIndicator) {
-                entries = scan(project, { indicator.checkCanceled() }, { indicator.text2 = it.path })
+                entries = scan(project, { indicator.checkCanceled() }, { indicator.text2 = it.path }, selectedFile)
                 indicator.checkCanceled()
                 if (entries.any { it.result.after == null }) {
                     val root = project.basePath ?: error("无法确定报告保存目录。请打开本地项目后重新扫描。")
@@ -68,7 +74,7 @@ class MigrateSystemBackProjectAction : AnAction() {
                 }
                 val changes = entries.filter { it.result.after != null }
                 if (changes.isEmpty()) return
-                if (!Preview(project, changes).showAndGet()) return
+                if (!Preview(project, changes, selectedFile != null).showAndGet()) return
                 apply(project, changes)
             }
 
@@ -84,19 +90,33 @@ class MigrateSystemBackProjectAction : AnAction() {
             override fun toString() = "${if (result.after == null) "[需人工处理]" else "[可迁移]"} ${file.path}"
         }
 
-        internal fun scan(project: Project, checkCanceled: () -> Unit = {}, onFile: (VirtualFile) -> Unit = {}): List<Entry> {
+        internal fun scan(project: Project, checkCanceled: () -> Unit = {}, onFile: (VirtualFile) -> Unit = {}, selectedFile: VirtualFile? = null): List<Entry> {
             val files = ReadAction.compute<List<VirtualFile>, RuntimeException> {
                 MigrateButterKnifeAction.collectMigrationFiles(project, null, checkCanceled)
             }
-            return files.mapNotNull { file ->
-                checkCanceled()
-                onFile(file)
-                ReadAction.compute<Entry?, RuntimeException> {
-                    if (!file.isValid || project.isDisposed) return@compute null
-                    val psi = PsiManager.getInstance(project).findFile(file) ?: return@compute null
-                    SystemBackMigration.plan(psi)?.let { Entry(file, it) }
+            return ReadAction.compute<List<Entry>, RuntimeException> {
+                val sources = files.mapNotNull { file ->
+                    checkCanceled()
+                    onFile(file)
+                    if (!file.isValid || project.isDisposed) null else PsiManager.getInstance(project).findFile(file)
                 }
-            }.sortedBy { it.file.path }
+                val selected = selectedFile?.takeIf { it.isValid }?.let { PsiManager.getInstance(project).findFile(it) }
+                if (selectedFile != null && selected == null) return@compute emptyList()
+                val related = if (selected == null) sources else {
+                    val owners = sources.mapNotNull { psi -> SystemBackHandlerExtraction.owner(psi)?.let { psi to it } }.toMap()
+                    val included = mutableSetOf(selected)
+                    do {
+                        val before = included.size
+                        val classes = included.mapNotNull { owners[it] }
+                        owners.filter { (_, owner) -> classes.any { other ->
+                            owner == other || InheritanceUtil.isInheritor(owner, other.qualifiedName ?: "") ||
+                                InheritanceUtil.isInheritor(other, owner.qualifiedName ?: "")
+                        } }.keys.forEach { included += it }
+                    } while (included.size != before)
+                    included.toList()
+                }
+                SystemBackMigration.planFiles(related).map { (psi, result) -> Entry(psi.virtualFile, result) }.sortedBy { it.file.path }
+            }
         }
 
         internal fun applyChanges(project: Project, entries: List<Entry>): Boolean {
@@ -129,11 +149,11 @@ class MigrateSystemBackProjectAction : AnAction() {
         SystemBackMigrationReport.notify(project, "已迁移 ${entries.size} 个文件，可通过 Undo 统一撤销。请编译并验证返回行为。")
     }
 
-    private class Preview(project: Project, entries: List<Entry>) : DialogWrapper(project) {
+    private class Preview(project: Project, entries: List<Entry>, selected: Boolean) : DialogWrapper(project) {
         private val panel = JPanel(BorderLayout(8, 8))
         init {
             val count = entries.count { it.result.after != null }
-            title = "全项目系统返回键迁移预览"
+            title = if (selected) "当前文件及返回继承链迁移预览" else "全项目系统返回键迁移预览"
             setOKButtonText("应用 $count 个文件的改动")
             isOKActionEnabled = count > 0
             val list = JList(entries.toTypedArray()).apply { selectionMode = ListSelectionModel.SINGLE_SELECTION }
